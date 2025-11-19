@@ -79,6 +79,7 @@ class Head(nn.Module):
         wei = q @ k.transpose(-2, -1) * C**-0.5 # (B, T, C) @ (B, C, T) --> (B, T, T)
         wei = wei.masked_fill(self.tril[:T, :T] == 0, float('-inf'))
         wei = F.softmax(wei, dim=-1) # (B, T, T)
+        wei = self.dropout(wei)
         # perform the weighted aggregation of the values 
         v = self.value(x) # (B, T, C)
         out = wei @ v # (B, T, T) @ (B, T, C) --> (B, T, C)
@@ -90,6 +91,7 @@ class MultiHeadAttention(nn.Module):
         super().__init__()
         self.heads = nn.ModuleList([Head(head_size) for _ in range(num_heads)])
         self.proj = nn.Linear(n_embd, n_embd)
+        self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
         out = torch.cat([h(x) for h in self.heads], dim=-1) 
@@ -105,6 +107,7 @@ class FeedForward(nn.Module):
             nn.Linear(n_embd, 4 * n_embd),
             nn.ReLU(),
             nn.Linear(4 *n_embd, n_embd),
+            nn.Dropout(dropout),
         )
 
     def forward(self, x):
@@ -118,10 +121,12 @@ class Block(nn.Module):
         head_size = n_embd // n_head
         self.sa = MultiHeadAttention(n_head, head_size) # Communcation 
         self.ffwd = FeedForward(n_embd)
+        self.ln1 = nn.LayerNorm(n_embd)
+        self.ln2 = nn.LayerNorm(n_embd)
         
     def forward(self, x):
-        x = x + self.sa(x) # fork off and perform communication and come back
-        x = x + self.ffwd(x) # fork off and perform computation and come back
+        x = x + self.sa(self.ln1(x)) # fork off and perform communication and come back
+        x = x + self.ffwd(self.ln2(x)) # fork off and perform computation and come back
         return x
 
         
@@ -134,11 +139,8 @@ class BigramLanguageModel(nn.Module):
         self.token_embedding_table = nn.Embedding(vocab_size, n_embd) # (C, C)
         # each position from 0 to block_size-1 will get an embedding vector 
         self.position_embedding_table = nn.Embedding(block_size, n_embd)
-        self.blocks = nn.Sequential(
-            Block(n_embd, n_head=4),
-            Block(n_embd, n_head=4),
-            Block(n_embd, n_head=4),
-        )
+        self.blocks = nn.Sequential(*[Block(n_embd, n_head=n_head) for _ in range(n_layer)])
+        self.ln_f = nn.LayerNorm(n_embd)
         self.lm_head = nn.Linear(n_embd, vocab_size) # takes input vector of size n_embd and outputs vector of size vocab_size
     
     def forward(self, idx, targets=None):
